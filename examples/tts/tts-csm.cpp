@@ -7,6 +7,7 @@
 #include "mimi-model.h"
 #include "tts-csm-data.h"
 
+#include <cstddef>
 #include <initializer_list>
 #include <vector>
 #include <regex>
@@ -200,7 +201,7 @@ struct decode_embd_batch {
     }
 };
 
-static int generate_tts(common_params & params) {
+static int generate_tts(common_params & params, ChunkCallback callback) {
 
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -235,7 +236,7 @@ static int generate_tts(common_params & params) {
         return ENOENT;
     }
 
-    mimi_model mimi(params.vocoder.model.path.c_str(), true);
+    mimi_model mimi(params.vocoder.model.path.c_str(), false);
 
     // init sampler
     // the python implementation only has top-k and temperature sampling, so we'll use just that
@@ -258,6 +259,9 @@ static int generate_tts(common_params & params) {
     int64_t n_dc_gen   = 0; // decoder generation count
 
     std::vector<int> generated_codes;
+    std::vector<int> generated_codes_for_streaming;
+    int64_t n_codes_per_embd = 32;
+    size_t chunk_size = n_codes_per_embd * 30;
 
     std::vector<speaker_turn> turns;
     // speaker reference
@@ -344,8 +348,21 @@ static int generate_tts(common_params & params) {
             // printf("\n");
 
             llama_token semantic_tok = sample_token(sampler.get(), logits, llama_vocab_n_tokens(vocab_dc));
-            printf("Sem token %5d : %d,", 1+(int)generated_codes.size()/32, semantic_tok);
+            // printf("Sem token %5d : %d,", 1+(int)generated_codes.size()/32, semantic_tok);
             generated_codes.push_back(semantic_tok);
+            if (callback) {
+                generated_codes_for_streaming.push_back(semantic_tok);
+                if (generated_codes_for_streaming.size() >= chunk_size) {
+                    std::vector<int> temp = generated_codes_for_streaming;
+                    temp.resize(chunk_size);
+                    generated_codes_for_streaming.erase(
+                        generated_codes_for_streaming.begin(),
+                        generated_codes_for_streaming.begin() + chunk_size
+                    );
+                    std::vector<float> wav_data_temp = mimi.decode(temp);
+                    callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
+                }
+            }
 
             // for (size_t i = 0; i < 10; ++i) {
             //     printf("%4.2f, ", embd[i]);
@@ -398,10 +415,13 @@ static int generate_tts(common_params & params) {
 
                     // discard last code (only for embeddings)
                     if (i < n_codes - 1) {
-                        printf("%d,", acoustic_tok);
+                        // printf("%d,", acoustic_tok);
                         tok = acoustic_tok; // next input token
                         sum_codes += acoustic_tok;
                         generated_codes.push_back(acoustic_tok);
+                        if (callback) {
+                            generated_codes_for_streaming.push_back(acoustic_tok);
+                        }
                     }
 
                     // do progressive hsum of embeddings
@@ -410,7 +430,19 @@ static int generate_tts(common_params & params) {
                         inp_past_embd[i] += cb_data.embd[i];
                     }
                 }
-                printf("\n");
+                // printf("\n");
+
+                if (callback && generated_codes_for_streaming.size() >= chunk_size) {
+                    // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
+                    std::vector<int> temp = generated_codes_for_streaming;
+                    temp.resize(chunk_size);
+                    generated_codes_for_streaming.erase(
+                        generated_codes_for_streaming.begin(),
+                        generated_codes_for_streaming.begin() + chunk_size
+                    );
+                    std::vector<float> wav_data_temp = mimi.decode(temp);
+                    callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
+                }
 
                 llama_batch_free(batch_embd);
                 llama_batch_free(batch_token);
@@ -421,6 +453,7 @@ static int generate_tts(common_params & params) {
                 if (is_end_of_turn) {
                     // remove last 32 codes since they will be all zeros
                     generated_codes.resize(generated_codes.size() - 32);
+
                 }
             }
 
@@ -445,6 +478,15 @@ static int generate_tts(common_params & params) {
     llama_batch_free(batch_prompt);
     llama_batch_free(batch_past_embd);
 
+    if (callback) {
+        // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
+        std::vector<int> temp = generated_codes_for_streaming;
+        size_t remainder = temp.size() % chunk_size;
+        temp.resize(temp.size() - remainder);
+        std::vector<float> wav_data_temp = mimi.decode(temp);
+        callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
+    }
+
     printf("decode %zu RVQ tokens into wav...\n", generated_codes.size());
     std::vector<float> wav_data = mimi.decode(generated_codes);
 
@@ -464,7 +506,8 @@ static void generate_tts(
     const std::string & prompt,
     const std::string & model_path,
     const std::string & vocoder_model_path,
-    const std::string & out_file) {
+    const std::string & out_file,
+    ChunkCallback callback) {
 
     common_params params;
     params.prompt = prompt;
@@ -480,7 +523,7 @@ static void generate_tts(
         return;
     }
 
-    generate_tts(params);
+    generate_tts(params, callback);
 }
 
 
@@ -488,7 +531,8 @@ extern "C" void generate_tts(
     const char* prompt,
     const char* model_path,
     const char* vocoder_model_path,
-    const char* out_file) {
+    const char* out_file,
+    ChunkCallback callback) {
 
     // Convert to C++ strings internally
     const std::string prompt_str(prompt);
@@ -496,7 +540,7 @@ extern "C" void generate_tts(
     const std::string vocoder_model_path_str = vocoder_model_path ? std::string(vocoder_model_path) : "kyutai-mimi.gguf";
     const std::string out_file_str(out_file);
 
-    generate_tts(prompt_str, model_path_str, vocoder_model_path_str, out_file_str);
+    generate_tts(prompt_str, model_path_str, vocoder_model_path_str, out_file_str, callback);
 }
 
 int main(int argc, char ** argv) {
@@ -520,6 +564,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    return generate_tts(params);
+    return generate_tts(params, nullptr);
 }
 
