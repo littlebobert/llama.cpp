@@ -1,3 +1,4 @@
+#include "include/tts.h"
 #include "ggml.h"
 #include "llama.h"
 #include "common.h"
@@ -199,26 +200,7 @@ struct decode_embd_batch {
     }
 };
 
-int main(int argc, char ** argv) {
-    common_params params;
-
-    params.model.path         = "sesame-csm-backbone.gguf";
-    params.vocoder.model.path = "kyutai-mimi.gguf";
-    params.out_file           = "output.wav";
-    params.prompt             = "";
-    params.n_predict          = 2048; // CSM's max trained seq length
-    params.sampling.top_k     = 50;   // default param from CSM python code
-    params.sampling.temp      = 0.9;  // default param from CSM python code
-
-    // HF model (hack: we temporary reuse speculative.model as the decoder model, only to get it downloaded)
-    params.model.url              = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-backbone.gguf";
-    params.speculative.model.path = "sesame-csm-decoder.gguf";
-    params.speculative.model.url  = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-decoder.gguf";
-    params.vocoder.model.url      = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/kyutai-mimi.gguf";
-
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_TTS, print_usage)) {
-        return 1;
-    }
+static int generate_tts(common_params & params) {
 
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -477,3 +459,67 @@ int main(int argc, char ** argv) {
 
     return 0;
 }
+
+static void generate_tts(
+    const std::string & prompt,
+    const std::string & model_path,
+    const std::string & vocoder_model_path,
+    const std::string & out_file) {
+
+    common_params params;
+    params.prompt = prompt;
+    params.model.path = model_path;
+    params.vocoder.model.path = vocoder_model_path;
+    params.out_file = out_file;
+    params.n_predict          = 2048; // CSM's max trained seq length
+    params.sampling.top_k     = 50;   // default param from CSM python code
+    params.sampling.temp      = 0.9;  // default param from CSM python code
+
+    char* args = const_cast<char*>("");
+    if (!common_params_parse(0, &args, params, LLAMA_EXAMPLE_TTS, print_usage)) {
+        return;
+    }
+
+    generate_tts(params);
+}
+
+
+extern "C" void generate_tts(
+    const char* prompt,
+    const char* model_path,
+    const char* vocoder_model_path,
+    const char* out_file) {
+
+    // Convert to C++ strings internally
+    const std::string prompt_str(prompt);
+    const std::string model_path_str = model_path ? std::string(model_path) : "sesame-csm-backbone.gguf";
+    const std::string vocoder_model_path_str = vocoder_model_path ? std::string(vocoder_model_path) : "kyutai-mimi.gguf";
+    const std::string out_file_str(out_file);
+
+    generate_tts(prompt_str, model_path_str, vocoder_model_path_str, out_file_str);
+}
+
+int main(int argc, char ** argv) {
+    common_params params;
+
+    params.model.path         = "sesame-csm-backbone.gguf";
+    params.vocoder.model.path = "kyutai-mimi.gguf";
+    params.out_file           = "output.wav";
+    params.prompt             = "";
+    params.n_predict          = 2048; // CSM's max trained seq length
+    params.sampling.top_k     = 50;   // default param from CSM python code
+    params.sampling.temp      = 0.9;  // default param from CSM python code
+
+    // HF model (hack: we temporary reuse speculative.model as the decoder model, only to get it downloaded)
+    params.model.url              = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-backbone.gguf";
+    params.speculative.model.path = "sesame-csm-decoder.gguf";
+    params.speculative.model.url  = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-decoder.gguf";
+    params.vocoder.model.url      = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/kyutai-mimi.gguf";
+
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_TTS, print_usage)) {
+        return 1;
+    }
+
+    return generate_tts(params);
+}
+
