@@ -77,8 +77,8 @@ static std::vector<speaker_turn> get_speaker_turns(const std::string & input) {
 static speaker_turn get_ref_speaker_turn(const char * text, std::initializer_list<int> & codes, std::vector<float> & codebook) {
     const size_t n_embd = 2048;
     const size_t n_codes_per_codebook = 2051;
-    const size_t n_codebooks = 16;
-    // GGML_ASSERT(codebook.size() == n_embd * n_codes_per_codebook * n_codebooks);
+    const size_t n_codebooks = 32;
+    GGML_ASSERT(codebook.size() == n_embd * n_codes_per_codebook * n_codebooks);
     GGML_ASSERT(codes.size() % n_codebooks == 0);
 
     // 1 frame = num_codebooks codes
