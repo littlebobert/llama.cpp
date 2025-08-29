@@ -77,11 +77,11 @@ static std::vector<speaker_turn> get_speaker_turns(const std::string & input) {
 static speaker_turn get_ref_speaker_turn(const char * text, std::initializer_list<int> & codes, std::vector<float> & codebook) {
     const size_t n_embd = 2048;
     const size_t n_codes_per_codebook = 2051;
-    const size_t n_codebooks = 32;
-    GGML_ASSERT(codebook.size() == n_embd * n_codes_per_codebook * n_codebooks);
-    GGML_ASSERT(codes.size() % 32 == 0);
+    const size_t n_codebooks = 16;
+    // GGML_ASSERT(codebook.size() == n_embd * n_codes_per_codebook * n_codebooks);
+    GGML_ASSERT(codes.size() % n_codebooks == 0);
 
-    // 1 frame = 32 codes
+    // 1 frame = num_codebooks codes
     size_t n_frames = codes.size() / n_codebooks;
     speaker_turn turn;
     turn.text = text;
@@ -237,6 +237,10 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
     }
 
     mimi_model mimi(params.vocoder.model.path.c_str(), false);
+    
+    // Update chunk size based on the loaded model configuration
+    int num_codebooks = 16;
+    size_t chunk_size = num_codebooks * 30;
 
     // init sampler
     // the python implementation only has top-k and temperature sampling, so we'll use just that
@@ -260,8 +264,6 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
 
     std::vector<int> generated_codes;
     std::vector<int> generated_codes_for_streaming;
-    int64_t n_codes_per_embd = 32;
-    size_t chunk_size = n_codes_per_embd * 30;
 
     std::vector<speaker_turn> turns;
     // speaker reference
@@ -359,7 +361,7 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
                         generated_codes_for_streaming.begin(),
                         generated_codes_for_streaming.begin() + chunk_size
                     );
-                    std::vector<float> wav_data_temp = mimi.decode(temp);
+                    std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
                     callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
                 }
             }
@@ -393,11 +395,11 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
 
                 // then, decode the semantic_tok to generate acoustic tokens
                 llama_token tok = semantic_tok;
-                int n_codes = 32;
+                int n_codes = num_codebooks;
                 int sum_codes = semantic_tok; // to check if all codes are 0
                 for (int i = 0; i < n_codes; ++i) {
                     common_batch_clear(batch_token);
-                    // encoder vocab is further divided into 32 codebooks, each with 2051 entries
+                    // encoder vocab is further divided into num_codebooks codebooks, each with 2051 entries
                     llama_token inp_tok = tok + 2051*i;
                     common_batch_add(batch_token, inp_tok, i+1, { 0 }, true);
 
@@ -440,7 +442,7 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
                         generated_codes_for_streaming.begin(),
                         generated_codes_for_streaming.begin() + chunk_size
                     );
-                    std::vector<float> wav_data_temp = mimi.decode(temp);
+                    std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
                     callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
                 }
 
@@ -451,8 +453,8 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
                 // note: we still need to run backbone decode one more time to decode the audio's EOS token
                 is_end_of_turn = sum_codes == 0;
                 if (is_end_of_turn) {
-                    // remove last 32 codes since they will be all zeros
-                    generated_codes.resize(generated_codes.size() - 32);
+                    // remove last num_codebooks codes since they will be all zeros
+                    generated_codes.resize(generated_codes.size() - num_codebooks);
 
                 }
             }
@@ -481,21 +483,21 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
     if (callback) {
         // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
         std::vector<int> temp = generated_codes_for_streaming;
-        size_t remainder = temp.size() % n_codes_per_embd;
+        size_t remainder = temp.size() % num_codebooks;
         temp.resize(temp.size() - remainder);
-        std::vector<float> wav_data_temp = mimi.decode(temp);
+        std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
         callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
     }
 
-    printf("decode %zu RVQ tokens into wav...\n", generated_codes.size());
-    std::vector<float> wav_data = mimi.decode(generated_codes);
+    // printf("decode %zu RVQ tokens into wav...\n", generated_codes.size());
+    // std::vector<float> wav_data = mimi.decode(generated_codes);
 
-    printf("output wav file: %s\n", params.out_file.c_str());
+    // printf("output wav file: %s\n", params.out_file.c_str());
 
-    if (!save_wav16(params.out_file.c_str(), wav_data, mimi.get_sample_rate())) {
-        LOG_ERR("Failed to save wav file\n");
-        return 1;
-    }
+    // if (!save_wav16(params.out_file.c_str(), wav_data, mimi.get_sample_rate())) {
+    //     LOG_ERR("Failed to save wav file\n");
+    //     return 1;
+    // }
 
     printf("\n");
 

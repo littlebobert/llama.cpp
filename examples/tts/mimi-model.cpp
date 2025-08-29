@@ -566,11 +566,12 @@ struct mimi_residual_vector_quantizer {
     // the input has shape [n_codes, n_codes_per_embd]
     // first row is semantic, the rest are acoustic
     // example: [ [semantic], [acoustic1], [acoustic2], ... ]
-    ggml_tensor * decode(ggml_context * ctx0, ggml_tensor * input) {
+    ggml_tensor * decode(ggml_context * ctx0, ggml_tensor * input, int num_codebooks) {
         GGML_ASSERT(input->type == GGML_TYPE_I32);
 
-        size_t  n_semantic       = semantic_components.size();
-        int64_t n_codes_per_embd = (n_semantic + acoustic_components.size());
+        size_t  n_semantic       = 1;
+        size_t  n_acoustic       = num_codebooks - 1;
+        int64_t n_codes_per_embd = num_codebooks;
         int64_t n_codes          = input->ne[0] / n_codes_per_embd;
 
         GGML_ASSERT(input->ne[0] % n_codes_per_embd == 0);
@@ -587,8 +588,8 @@ struct mimi_residual_vector_quantizer {
                 ggml_tensor * codebook = semantic_components[ir].codebook;
                 ggml_tensor * embd = ggml_get_rows(ctx0, codebook, row);
                 out_s = ggml_add(ctx0, out_s, embd);
-            } else {
-                // acoustic
+            } else if (ir < n_semantic + n_acoustic) {
+                // acoustic (only use the requested number of acoustic codebooks)
                 ggml_tensor * codebook = acoustic_components[ir-n_semantic].codebook;
                 ggml_tensor * embd = ggml_get_rows(ctx0, codebook, row);
                 out_a = ggml_add(ctx0, out_a, embd);
@@ -616,11 +617,11 @@ mimi_model::mimi_model(const char * fname, bool verbose) : verbose(verbose) {
 mimi_model::~mimi_model() {
 }
 
-std::vector<float> mimi_model::decode_frame(const std::vector<int> & codes, int & n_past) {
+std::vector<float> mimi_model::decode_frame(const std::vector<int> & codes, int & n_past, int num_codebooks) {
     // build cgraph
     int n_pos            = -1;
     int n_codes          = codes.size();
-    int n_codes_per_embd = mimi_config.n_semantic_components + mimi_config.n_acoustic_components;
+    int n_codes_per_embd = num_codebooks;
     GGML_ASSERT(n_codes % n_codes_per_embd == 0 && "number of codes must be a multiply of n_codes_per_embd");
 
     ctx->build_graph([&](ggml_context * ctx_gf, ggml_cgraph * gf) {
@@ -629,7 +630,7 @@ std::vector<float> mimi_model::decode_frame(const std::vector<int> & codes, int 
         ggml_set_input(inp_dec);
 
         // RVQ
-        ggml_tensor * embeddings = quantizer->decode(ctx_gf, inp_dec);
+        ggml_tensor * embeddings = quantizer->decode(ctx_gf, inp_dec, num_codebooks);
 
         // upsample
         embeddings = ggml_cont(ctx_gf, ggml_transpose(ctx_gf, embeddings));
@@ -665,7 +666,7 @@ std::vector<float> mimi_model::decode_frame(const std::vector<int> & codes, int 
     ctx->set_tensor_data("pos_dec", pos_data.data());
 
     // code data
-    auto codes_T = mimi_model::transpose_input(codes);
+    auto codes_T = mimi_model::transpose_input(codes, num_codebooks);
     ctx->set_tensor_data("inp_dec", codes_T.data());
 
     ctx->compute();
@@ -683,22 +684,28 @@ std::vector<float> mimi_model::decode_frame(const std::vector<int> & codes, int 
     return wav_data;
 }
 
-std::vector<float> mimi_model::decode(const std::vector<int> & codes) {
+std::vector<float> mimi_model::decode(const std::vector<int> & codes, int num_codebooks) {
+    // Validate num_codebooks
+    GGML_ASSERT(num_codebooks >= 2 && "num_codebooks must be at least 2 (1 semantic + 1 acoustic)");
+    GGML_ASSERT(num_codebooks <= 32 && "num_codebooks must not exceed 32 (model limit)");
+
     std::vector<float> output;
 
     if (verbose) {
-        printf("%s: n_codes: %zu\n", __func__, codes.size());
+        printf("%s: n_codes: %zu, num_codebooks: %d\n", __func__, codes.size(), num_codebooks);
     }
 
     int64_t t_start = ggml_time_ms();
     int n_frames = 0;
 
     int n_past = 0;
-    for (size_t i = 0; i < codes.size(); i += mimi_config.n_codes_per_frame) {
-        size_t remaining = std::min((size_t)mimi_config.n_codes_per_frame, codes.size() - i);
+    int n_codes_per_frame = (mimi_config.sliding_window / 2) * num_codebooks;
+
+    for (size_t i = 0; i < codes.size(); i += n_codes_per_frame) {
+        size_t remaining = std::min((size_t)n_codes_per_frame, codes.size() - i);
         std::vector<int> frame(codes.begin() + i, codes.begin() + i + remaining);
 
-        auto wav_data = decode_frame(frame, n_past);
+        auto wav_data = decode_frame(frame, n_past, num_codebooks);
         output.insert(output.end(), wav_data.begin(), wav_data.end());
 
         n_frames++;
@@ -712,10 +719,10 @@ std::vector<float> mimi_model::decode(const std::vector<int> & codes) {
     return output;
 }
 
-std::vector<int> mimi_model::transpose_input(const std::vector<int> & codes) {
+std::vector<int> mimi_model::transpose_input(const std::vector<int> & codes, int num_codebooks) {
     int n_codes          = codes.size();
-    int n_codes_per_embd = mimi_config.n_semantic_components + mimi_config.n_acoustic_components;
-    GGML_ASSERT(n_codes % n_codes_per_embd == 0 && "number of codes must be a multiply of n_codes_per_embd");
+    int n_codes_per_embd = num_codebooks;
+    GGML_ASSERT(n_codes % n_codes_per_embd == 0 && "number of codes must be a multiply of num_codebooks");
 
     std::vector<int> codes_T(n_codes);
     for (int i = 0; i < n_codes / n_codes_per_embd; i++) {

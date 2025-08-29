@@ -405,21 +405,6 @@ combine_static_libraries() {
     rm -rf "${temp_dir}"
 }
 
-echo "Building for iOS simulator..."
-cmake -B build-ios-sim -G Xcode \
-    "${COMMON_CMAKE_ARGS[@]}" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=${IOS_MIN_OS_VERSION} \
-    -DIOS=ON \
-    -DCMAKE_SYSTEM_NAME=iOS \
-    -DCMAKE_OSX_SYSROOT=iphonesimulator \
-    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-    -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=iphonesimulator \
-    -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
-    -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
-    -DLLAMA_CURL=OFF \
-    -S .
-cmake --build build-ios-sim --config Release -- -quiet
-
 echo "Building for iOS devices..."
 cmake -B build-ios-device -G Xcode \
     "${COMMON_CMAKE_ARGS[@]}" \
@@ -435,19 +420,15 @@ cmake --build build-ios-device --config Release -- -quiet
 
 # Setup frameworks and copy binaries and headers
 echo "Setting up framework structures..."
-setup_framework_structure "build-ios-sim" ${IOS_MIN_OS_VERSION} "ios"
 setup_framework_structure "build-ios-device" ${IOS_MIN_OS_VERSION} "ios"
 
 # Create dynamic libraries from static libraries
 echo "Creating dynamic libraries from static libraries..."
-combine_static_libraries "build-ios-sim" "Release-iphonesimulator" "ios" "true"
 combine_static_libraries "build-ios-device" "Release-iphoneos" "ios" "false"
 
 # Create XCFramework with correct debug symbols paths
 echo "Creating XCFramework..."
 xcodebuild -create-xcframework \
-    -framework $(pwd)/build-ios-sim/framework/llama.framework \
-    -debug-symbols $(pwd)/build-ios-sim/dSYMs/llama.dSYM \
     -framework $(pwd)/build-ios-device/framework/llama.framework \
     -debug-symbols $(pwd)/build-ios-device/dSYMs/llama.dSYM \
     -output $(pwd)/build-apple/llama.xcframework
