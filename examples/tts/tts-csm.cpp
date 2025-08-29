@@ -481,7 +481,7 @@ static int generate_tts(common_params & params, ChunkCallback callback) {
     if (callback) {
         // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
         std::vector<int> temp = generated_codes_for_streaming;
-        size_t remainder = temp.size() % chunk_size;
+        size_t remainder = temp.size() % n_codes_per_embd;
         temp.resize(temp.size() - remainder);
         std::vector<float> wav_data_temp = mimi.decode(temp);
         callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
