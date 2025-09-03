@@ -703,9 +703,11 @@ struct gguf_context * gguf_init_from_file_impl(FILE * file, struct gguf_init_par
 }
 
 struct gguf_context * gguf_init_from_file(const char * fname, struct gguf_init_params params) {
-    FILE * file = ggml_fopen(fname, "rb");
+    FILE * file = fopen(fname, "rb");
 
     if (!file) {
+        int error_code = errno;
+        fprintf(stderr, "failed to open file: %s\n", strerror(error_code));
         fprintf(stderr, "%s: failed to open GGUF file '%s'\n", __func__, fname);
         return nullptr;
     }

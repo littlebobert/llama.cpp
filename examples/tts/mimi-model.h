@@ -22,18 +22,19 @@ struct mimi_model {
 
     int get_sample_rate() const;
 
-    // layout of codes: (1 semantic code followed by 31 acoustic codes) repeast N times
-    std::vector<float> decode(const std::vector<int> & codes);
+    // layout of codes: (1 semantic code followed by (num_codebooks-1) acoustic codes) repeat N times
+    // num_codebooks: total number of codebooks (1 semantic + (num_codebooks-1) acoustic)
+    std::vector<float> decode(const std::vector<int> & codes, int num_codebooks);
 
     // TODO: implement encoding pass
     // std::vector<int> encode(const std::vector<float> & wav_data);
 
 private:
-    std::vector<float> decode_frame(const std::vector<int> & codes, int & n_past);
+    std::vector<float> decode_frame(const std::vector<int> & codes, int & n_past, int num_codebooks);
 
     // transpose layout (from streaming layout to non-streaming):
-    // - from: (1 semantic code followed by 31 acoustic codes) repeast N times
-    // - to:   N semantic codes followed by (N*31) acoustic codes
-    // streaming layout is 1-31, 1-31, 1-31, ..., used for real-time processing
-    static std::vector<int> transpose_input(const std::vector<int> & codes);
+    // - from: (1 semantic code followed by (num_codebooks-1) acoustic codes) repeat N times
+    // - to:   N semantic codes followed by (N*(num_codebooks-1)) acoustic codes
+    // streaming layout is 1-acoustic, 1-acoustic, ..., used for real-time processing
+    static std::vector<int> transpose_input(const std::vector<int> & codes, int num_codebooks);
 };

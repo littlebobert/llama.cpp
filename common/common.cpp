@@ -1573,6 +1573,8 @@ common_control_vector_data common_control_vector_load(const std::vector<common_c
 bool save_wav16(const std::string & fname, const std::vector<float> & data, int sample_rate) {
     std::ofstream file(fname, std::ios::binary);
     if (!file) {
+        int error_code = errno;
+        fprintf(stderr, "failed to open file: %s\n", strerror(error_code));
         LOG_ERR("%s: Failed to open file '%s' for writing.\n", __func__, fname.c_str());
         return false;
     }

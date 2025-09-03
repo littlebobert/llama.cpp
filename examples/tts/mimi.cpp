@@ -27,14 +27,17 @@ int main(int argc, const char ** argv) {
 
     // load codes
     std::vector<int> codes;
+    int num_codebooks = 16;
+
     if (strcmp(codes_path, "dummy0") == 0) {
         printf("Using dummy0 codes\n");
-        codes.resize(32 * 3); // [n_codes_per_embd = 32, n_codes = 3]
+        codes.resize(num_codebooks * 3); // [n_codes_per_embd, n_codes = 3]
         for (int i = 0; i < (int)codes.size(); i++) {
             codes[i] = i;
         }
     } else if (strcmp(codes_path, "dummy1") == 0) {
         printf("Using dummy1 codes\n");
+        num_codebooks = 32;  // dummy1 uses full 32 codebooks
         codes = {
             1049 ,1597 ,1325 ,839  ,592  ,1440 ,1341 ,985  ,1239 ,1146 ,1778 ,1636 ,1485 ,1622 ,757  ,480  ,
             1899 ,1481 ,840  ,1397 ,82   ,1565 ,116  ,1449 ,1038 ,1015 ,436  ,150  ,159  ,1414 ,1740 ,1971 ,
@@ -69,6 +72,69 @@ int main(int argc, const char ** argv) {
             1511 ,433  ,284  ,721  ,1741 ,56   ,615  ,916  ,887  ,1253 ,916  ,535  ,1666 ,1175 ,716  ,269  ,
             447  ,32   ,63   ,321  ,1860 ,1986 ,1009 ,1849 ,1062 ,471  ,2018 ,1213 ,1557 ,990  ,696  ,677  ,
         };
+    } else if (strcmp(codes_path, "dummy2") == 0) {
+        printf("Using dummy2 codes\n");
+        num_codebooks = 8;  // dummy2 uses 8 codebooks (1 semantic + 7 acoustic)
+        codes = {
+            1049 ,1597 ,1325 ,839  ,592  ,1440 ,1341 ,985 ,
+            1415 ,175  ,1539 ,776  ,1046 ,117  ,803  ,1499,
+            1962 ,1280 ,1943 ,878  ,1588 ,723  ,568  ,1736,
+            914  ,1202 ,1601 ,1719 ,1670 ,412  ,568  ,1838,
+            1372 ,1911 ,141  ,1069 ,1485 ,642  ,1370 ,702 ,
+            704  ,85   ,257  ,1302 ,1141 ,1717 ,1995 ,1345,
+            1922 ,47   ,564  ,893  ,34   ,131  ,1063 ,1657,
+            2036 ,692  ,1435 ,2005 ,1465 ,37   ,892  ,511 ,
+            288  ,632  ,876  ,875  ,1156 ,345  ,273  ,1774,
+            968  ,251  ,1096 ,908  ,1938 ,112  ,895  ,1787,
+            193  ,1553 ,636  ,586  ,435  ,1979 ,1226 ,945 ,
+            1139 ,1735 ,61   ,2001 ,753  ,2034 ,354  ,1927,
+            897  ,1577 ,1497 ,186  ,1418 ,1822 ,1726 ,947 ,
+            897  ,132  ,1010 ,1932 ,277  ,1536 ,1541 ,952 ,
+            1243 ,471  ,485  ,1765 ,391  ,1281 ,1607 ,1418,
+            1511 ,433  ,284  ,721  ,1741 ,56   ,615  ,916 ,
+        };
+    } else if (strcmp(codes_path, "dummy3") == 0) {
+        printf("Using dummy3 codes\n");
+        num_codebooks = 4;  // dummy3 uses 4 codebooks (1 semantic + 3 acoustic)
+        codes = {
+            1049 ,1597 ,1325 ,839 ,
+            1415 ,175  ,1539 ,776 ,
+            1962 ,1280 ,1943 ,878 ,
+            914  ,1202 ,1601 ,1719,
+            1372 ,1911 ,141  ,1069,
+            704  ,85   ,257  ,1302,
+            1922 ,47   ,564  ,893 ,
+            2036 ,692  ,1435 ,2005,
+            288  ,632  ,876  ,875 ,
+            968  ,251  ,1096 ,908 ,
+            193  ,1553 ,636  ,586 ,
+            1139 ,1735 ,61   ,2001,
+            897  ,1577 ,1497 ,186 ,
+            897  ,132  ,1010 ,1932,
+            1243 ,471  ,485  ,1765,
+            1511 ,433  ,284  ,721 ,
+        };
+    } else if (strcmp(codes_path, "dummy4") == 0) {
+        printf("Using dummy4 codes\n");
+        num_codebooks = 2;  // dummy4 uses 2 codebooks (1 semantic + 1 acoustic)
+        codes = {
+            1049 ,1597,
+            1415 ,175 ,
+            1962 ,1280,
+            914  ,1202,
+            1372 ,1911,
+            704  ,85  ,
+            1922 ,47  ,
+            2036 ,692 ,
+            288  ,632 ,
+            968  ,251 ,
+            193  ,1553,
+            1139 ,1735,
+            897  ,1577,
+            897  ,132 ,
+            1243 ,471 ,
+            1511 ,433 ,
+        };
     } else {
         std::ifstream fin(codes_path);
         if (!fin) {
@@ -97,7 +163,7 @@ int main(int argc, const char ** argv) {
     }
 
     mimi_model model(model_path, true);
-    std::vector<float> wav_data = model.decode(codes);
+    std::vector<float> wav_data = model.decode(codes, num_codebooks);
 
     // print first 20 values
     printf("Number of output samples: %d\n", (int)wav_data.size());

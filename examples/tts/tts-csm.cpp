@@ -1,3 +1,4 @@
+#include "include/tts.h"
 #include "ggml.h"
 #include "llama.h"
 #include "common.h"
@@ -6,6 +7,7 @@
 #include "mimi-model.h"
 #include "tts-csm-data.h"
 
+#include <cstddef>
 #include <initializer_list>
 #include <vector>
 #include <regex>
@@ -77,9 +79,9 @@ static speaker_turn get_ref_speaker_turn(const char * text, std::initializer_lis
     const size_t n_codes_per_codebook = 2051;
     const size_t n_codebooks = 32;
     GGML_ASSERT(codebook.size() == n_embd * n_codes_per_codebook * n_codebooks);
-    GGML_ASSERT(codes.size() % 32 == 0);
+    GGML_ASSERT(codes.size() % n_codebooks == 0);
 
-    // 1 frame = 32 codes
+    // 1 frame = num_codebooks codes
     size_t n_frames = codes.size() / n_codebooks;
     speaker_turn turn;
     turn.text = text;
@@ -199,26 +201,7 @@ struct decode_embd_batch {
     }
 };
 
-int main(int argc, char ** argv) {
-    common_params params;
-
-    params.model.path         = "sesame-csm-backbone.gguf";
-    params.vocoder.model.path = "kyutai-mimi.gguf";
-    params.out_file           = "output.wav";
-    params.prompt             = "";
-    params.n_predict          = 2048; // CSM's max trained seq length
-    params.sampling.top_k     = 50;   // default param from CSM python code
-    params.sampling.temp      = 0.9;  // default param from CSM python code
-
-    // HF model (hack: we temporary reuse speculative.model as the decoder model, only to get it downloaded)
-    params.model.url              = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-backbone.gguf";
-    params.speculative.model.path = "sesame-csm-decoder.gguf";
-    params.speculative.model.url  = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-decoder.gguf";
-    params.vocoder.model.url      = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/kyutai-mimi.gguf";
-
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_TTS, print_usage)) {
-        return 1;
-    }
+static int generate_tts(common_params & params, ChunkCallback callback) {
 
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -253,7 +236,11 @@ int main(int argc, char ** argv) {
         return ENOENT;
     }
 
-    mimi_model mimi(params.vocoder.model.path.c_str(), true);
+    mimi_model mimi(params.vocoder.model.path.c_str(), false);
+    
+    // Update chunk size based on the loaded model configuration
+    int num_codebooks = 16;
+    size_t chunk_size = num_codebooks * 30;
 
     // init sampler
     // the python implementation only has top-k and temperature sampling, so we'll use just that
@@ -276,6 +263,7 @@ int main(int argc, char ** argv) {
     int64_t n_dc_gen   = 0; // decoder generation count
 
     std::vector<int> generated_codes;
+    std::vector<int> generated_codes_for_streaming;
 
     std::vector<speaker_turn> turns;
     // speaker reference
@@ -362,8 +350,21 @@ int main(int argc, char ** argv) {
             // printf("\n");
 
             llama_token semantic_tok = sample_token(sampler.get(), logits, llama_vocab_n_tokens(vocab_dc));
-            printf("Sem token %5d : %d,", 1+(int)generated_codes.size()/32, semantic_tok);
+            // printf("Sem token %5d : %d,", 1+(int)generated_codes.size()/32, semantic_tok);
             generated_codes.push_back(semantic_tok);
+            if (callback) {
+                generated_codes_for_streaming.push_back(semantic_tok);
+                if (generated_codes_for_streaming.size() >= chunk_size) {
+                    std::vector<int> temp = generated_codes_for_streaming;
+                    temp.resize(chunk_size);
+                    generated_codes_for_streaming.erase(
+                        generated_codes_for_streaming.begin(),
+                        generated_codes_for_streaming.begin() + chunk_size
+                    );
+                    std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
+                    callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
+                }
+            }
 
             // for (size_t i = 0; i < 10; ++i) {
             //     printf("%4.2f, ", embd[i]);
@@ -394,11 +395,11 @@ int main(int argc, char ** argv) {
 
                 // then, decode the semantic_tok to generate acoustic tokens
                 llama_token tok = semantic_tok;
-                int n_codes = 32;
+                int n_codes = num_codebooks;
                 int sum_codes = semantic_tok; // to check if all codes are 0
                 for (int i = 0; i < n_codes; ++i) {
                     common_batch_clear(batch_token);
-                    // encoder vocab is further divided into 32 codebooks, each with 2051 entries
+                    // encoder vocab is further divided into num_codebooks codebooks, each with 2051 entries
                     llama_token inp_tok = tok + 2051*i;
                     common_batch_add(batch_token, inp_tok, i+1, { 0 }, true);
 
@@ -416,10 +417,13 @@ int main(int argc, char ** argv) {
 
                     // discard last code (only for embeddings)
                     if (i < n_codes - 1) {
-                        printf("%d,", acoustic_tok);
+                        // printf("%d,", acoustic_tok);
                         tok = acoustic_tok; // next input token
                         sum_codes += acoustic_tok;
                         generated_codes.push_back(acoustic_tok);
+                        if (callback) {
+                            generated_codes_for_streaming.push_back(acoustic_tok);
+                        }
                     }
 
                     // do progressive hsum of embeddings
@@ -428,7 +432,19 @@ int main(int argc, char ** argv) {
                         inp_past_embd[i] += cb_data.embd[i];
                     }
                 }
-                printf("\n");
+                // printf("\n");
+
+                if (callback && generated_codes_for_streaming.size() >= chunk_size) {
+                    // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
+                    std::vector<int> temp = generated_codes_for_streaming;
+                    temp.resize(chunk_size);
+                    generated_codes_for_streaming.erase(
+                        generated_codes_for_streaming.begin(),
+                        generated_codes_for_streaming.begin() + chunk_size
+                    );
+                    std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
+                    callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
+                }
 
                 llama_batch_free(batch_embd);
                 llama_batch_free(batch_token);
@@ -437,8 +453,9 @@ int main(int argc, char ** argv) {
                 // note: we still need to run backbone decode one more time to decode the audio's EOS token
                 is_end_of_turn = sum_codes == 0;
                 if (is_end_of_turn) {
-                    // remove last 32 codes since they will be all zeros
-                    generated_codes.resize(generated_codes.size() - 32);
+                    // remove last num_codebooks codes since they will be all zeros
+                    generated_codes.resize(generated_codes.size() - num_codebooks);
+
                 }
             }
 
@@ -463,17 +480,92 @@ int main(int argc, char ** argv) {
     llama_batch_free(batch_prompt);
     llama_batch_free(batch_past_embd);
 
-    printf("decode %zu RVQ tokens into wav...\n", generated_codes.size());
-    std::vector<float> wav_data = mimi.decode(generated_codes);
-
-    printf("output wav file: %s\n", params.out_file.c_str());
-
-    if (!save_wav16(params.out_file.c_str(), wav_data, mimi.get_sample_rate())) {
-        LOG_ERR("Failed to save wav file\n");
-        return 1;
+    if (callback) {
+        // printf("decode %zu RVQ tokens into PCM data...\n", generated_codes_for_streaming.size());
+        std::vector<int> temp = generated_codes_for_streaming;
+        size_t remainder = temp.size() % num_codebooks;
+        temp.resize(temp.size() - remainder);
+        std::vector<float> wav_data_temp = mimi.decode(temp, num_codebooks);
+        callback(wav_data_temp.data(), wav_data_temp.size(), 24000);
     }
+
+    // printf("decode %zu RVQ tokens into wav...\n", generated_codes.size());
+    // std::vector<float> wav_data = mimi.decode(generated_codes);
+
+    // printf("output wav file: %s\n", params.out_file.c_str());
+
+    // if (!save_wav16(params.out_file.c_str(), wav_data, mimi.get_sample_rate())) {
+    //     LOG_ERR("Failed to save wav file\n");
+    //     return 1;
+    // }
 
     printf("\n");
 
     return 0;
 }
+
+static void generate_tts(
+    const std::string & prompt,
+    const std::string & model_path,
+    const std::string & vocoder_model_path,
+    const std::string & out_file,
+    ChunkCallback callback) {
+
+    common_params params;
+    params.prompt = prompt;
+    params.model.path = model_path;
+    params.vocoder.model.path = vocoder_model_path;
+    params.out_file = out_file;
+    params.n_predict          = 2048; // CSM's max trained seq length
+    params.sampling.top_k     = 50;   // default param from CSM python code
+    params.sampling.temp      = 0.9;  // default param from CSM python code
+
+    char* args = const_cast<char*>("");
+    if (!common_params_parse(0, &args, params, LLAMA_EXAMPLE_TTS, print_usage)) {
+        return;
+    }
+
+    generate_tts(params, callback);
+}
+
+
+extern "C" void generate_tts(
+    const char* prompt,
+    const char* model_path,
+    const char* vocoder_model_path,
+    const char* out_file,
+    ChunkCallback callback) {
+
+    // Convert to C++ strings internally
+    const std::string prompt_str(prompt);
+    const std::string model_path_str = model_path ? std::string(model_path) : "sesame-csm-backbone.gguf";
+    const std::string vocoder_model_path_str = vocoder_model_path ? std::string(vocoder_model_path) : "kyutai-mimi.gguf";
+    const std::string out_file_str(out_file);
+
+    generate_tts(prompt_str, model_path_str, vocoder_model_path_str, out_file_str, callback);
+}
+
+int main(int argc, char ** argv) {
+    common_params params;
+
+    params.model.path         = "sesame-csm-backbone.gguf";
+    params.vocoder.model.path = "kyutai-mimi.gguf";
+    params.out_file           = "output.wav";
+    params.prompt             = "";
+    params.n_predict          = 2048; // CSM's max trained seq length
+    params.sampling.top_k     = 50;   // default param from CSM python code
+    params.sampling.temp      = 0.9;  // default param from CSM python code
+
+    // HF model (hack: we temporary reuse speculative.model as the decoder model, only to get it downloaded)
+    params.model.url              = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-backbone.gguf";
+    params.speculative.model.path = "sesame-csm-decoder.gguf";
+    params.speculative.model.url  = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/sesame-csm-decoder.gguf";
+    params.vocoder.model.url      = "https://huggingface.co/ggml-org/sesame-csm-1b-GGUF/resolve/main/kyutai-mimi.gguf";
+
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_TTS, print_usage)) {
+        return 1;
+    }
+
+    return generate_tts(params, nullptr);
+}
+
